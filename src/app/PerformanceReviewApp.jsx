@@ -52,6 +52,7 @@ const ADMIN_USERS = [
   { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
   { email: "yvonne@livecapital.fund", password: "egbon" },
   { email: "s.i@livecapital.fund", password: "seniorman" },
+  { email: "josh@livecapital.fund", password: "joshc" },
 ];
 
 const staffTableKey = (staffId) => `lc_reviews_${staffId}`;
@@ -279,7 +280,7 @@ const styles = `
   .home-title { font-family: 'Cormorant Garamond', serif; font-size: clamp(42px, 6vw, 64px); font-weight: 300; line-height: 1.1; color: var(--text); margin-bottom: 16px; }
   .home-title span { color: var(--gold); font-style: italic; }
   .home-desc { font-size: 15px; color: var(--muted); line-height: 1.7; margin-bottom: 48px; max-width: 520px; margin-left: auto; margin-right: auto; }
-  .home-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; width: 100%; max-width: 560px; }
+  .home-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; width: 100%; max-width: 560px; margin: 0 auto;}
   .home-card {
     padding: 32px 28px; border: 1px solid var(--border); border-radius: 8px;
     background: var(--surface); cursor: pointer; transition: all 0.25s; text-align: left;
@@ -288,7 +289,7 @@ const styles = `
   .home-card-icon { font-size: 28px; margin-bottom: 16px; }
   .home-card-title { font-family: 'Cormorant Garamond', serif; font-size: 22px; font-weight: 500; margin-bottom: 8px; }
   .home-card-desc { font-size: 13px; color: var(--muted); line-height: 1.6; }
-  .home-notice { margin-top: 40px; padding: 16px 24px; border: 1px solid var(--gold-dim); border-radius: 6px; background: var(--gold-dim); max-width: 560px; }
+  .home-notice { margin-top: 40px; padding: 16px 24px; border: 1px solid var(--gold-dim); border-radius: 6px; background: var(--gold-dim); max-width: 560px; margin: 24px auto; }
   .home-notice p { font-size: 13px; color: var(--muted); text-align: center; line-height: 1.6; }
   .home-notice strong { color: var(--gold); }
 
@@ -452,7 +453,7 @@ const styles = `
   @media (max-width: 900px) {
     .stats-grid { grid-template-columns: repeat(2, 1fr); }
     .category-breakdown { grid-template-columns: 1fr; }
-    .home-cards { grid-template-columns: 1fr; }
+    .home-cards { grid-template-columns: 1fr; margin: 0 auto; }
     .admin-page, .detail-page { padding: 20px; }
     .topbar { padding: 16px 20px; }
   }
@@ -624,6 +625,24 @@ export default function PerformanceReviewApp() {
               await saveExtraStaff(next);
               setReloadToken((t) => t + 1);
             }}
+            onDeleteStaff={async (id) => {
+              // Only deletable staff are those added via the admin UI (extraStaff)
+              const next = extraStaff.filter((s) => s.id !== id);
+              setExtraStaff(next);
+              await saveExtraStaff(next);
+              setTablesByStaff((prev) => {
+                const clone = { ...prev };
+                delete clone[id];
+                return clone;
+              });
+              setReloadToken((t) => t + 1);
+            }}
+            onDeleteQuestion={async (id) => {
+              const next = questions.filter((q) => q.id !== id);
+              setQuestions(next);
+              await saveQuestions(next);
+            }}
+            baseStaffIds={STAFF_LIST.map((s) => s.id)}
             onViewStaff={(staffId) => {
               setSelectedStaffId(staffId);
               setView("staff-detail");
@@ -1110,7 +1129,22 @@ function AdminLogin({ onSuccess }) {
   );
 }
 
-function AdminDashboard({ staffList, staffStats, adminTab, setAdminTab, tablesByStaff, allSubmissions, staffById, questions, onAddQuestion, onAddStaff, onViewStaff }) {
+function AdminDashboard({
+  staffList,
+  staffStats,
+  adminTab,
+  setAdminTab,
+  tablesByStaff,
+  allSubmissions,
+  staffById,
+  questions,
+  onAddQuestion,
+  onAddStaff,
+  onDeleteStaff,
+  onDeleteQuestion,
+  baseStaffIds,
+  onViewStaff,
+}) {
   const { totalSubmissions, reviewedStaff, companyAvg, perStaff } = staffStats;
 
   const [newStaffName, setNewStaffName] = useState("");
@@ -1309,6 +1343,46 @@ function AdminDashboard({ staffList, staffStats, adminTab, setAdminTab, tablesBy
             </div>
           </div>
 
+          <div className="section-title">Existing Added Staff</div>
+          <div className="table-wrap" style={{ padding: 0 }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Role</th>
+                  <th style={{ width: 80 }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {staffList.filter((s) => !baseStaffIds?.includes(s.id)).length === 0 ? (
+                  <tr>
+                    <td colSpan={3} style={{ fontSize: 13, color: "var(--muted)", padding: 16 }}>
+                      No additional staff have been added yet.
+                    </td>
+                  </tr>
+                ) : (
+                  staffList
+                    .filter((s) => !baseStaffIds?.includes(s.id))
+                    .map((s) => (
+                      <tr key={s.id}>
+                        <td style={{ fontWeight: 500 }}>{s.name}</td>
+                        <td style={{ color: "var(--muted)" }}>{s.role}</td>
+                        <td style={{ textAlign: "right" }}>
+                          <button
+                            className="btn btn-ghost btn-sm"
+                            style={{ color: "var(--danger)", borderColor: "var(--danger)" }}
+                            onClick={() => onDeleteStaff(s.id)}
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                )}
+              </tbody>
+            </table>
+          </div>
+
           <div className="section-title">Custom Questions</div>
           <div className="table-wrap" style={{ padding: 24 }}>
             <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 12 }}>Add guidance questions for reviewers</div>
@@ -1354,10 +1428,25 @@ function AdminDashboard({ staffList, staffStats, adminTab, setAdminTab, tablesBy
                       background: "var(--surface)",
                       fontSize: 13,
                       color: "var(--text)",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      gap: 12,
                     }}
                   >
-                    {q.text}
-                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{formatDate(q.createdAt || q.created_at || new Date().toISOString(), "short")}</div>
+                    <div>
+                      <div>{q.text}</div>
+                      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                        {formatDate(q.createdAt || q.created_at || new Date().toISOString(), "short")}
+                      </div>
+                    </div>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      style={{ color: "var(--danger)", borderColor: "var(--danger)" }}
+                      onClick={() => onDeleteQuestion(q.id)}
+                    >
+                      Delete
+                    </button>
                   </li>
                 ))}
               </ul>
