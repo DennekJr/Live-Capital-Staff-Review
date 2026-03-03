@@ -1,0 +1,26 @@
+[
+  {
+    "staffId": "s16",
+    "row": {
+      "rowId": "r_1772561941044_jrcy3",
+      "reviewerId": "s13",
+      "scores": {
+        "goalAchievement": 1,
+        "qualityOfWork": 1,
+        "efficiency": 1,
+        "crossDeptSupport": 1,
+        "knowledgeSharing": 1,
+        "conflictMgmt": 1,
+        "decisionMaking": 3,
+        "mentorship": 3,
+        "proactivity": 3,
+        "integrity": 3,
+        "adaptability": 3,
+        "brandRep": 2
+      },
+      "comment": "nomesense",
+      "timestamp": "2026-03-03T18:19:01.044Z",
+      "weightedScore": 33
+    }
+  }
+]
