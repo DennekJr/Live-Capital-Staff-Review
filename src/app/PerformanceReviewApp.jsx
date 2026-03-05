@@ -60,6 +60,7 @@ const ALL_INDEX_KEY = "lc_all_index";
 const reviewerProgressKey = (reviewerId) => `lc_reviewer_progress_${reviewerId}`;
 const EXTRA_STAFF_KEY = "lc_extra_staff";
 const QUESTIONS_KEY = "lc_admin_questions";
+const BASE_STAFF_OVERRIDES_KEY = "lc_base_staff_overrides";
 
 function calcScore(scores) {
   return METRICS.reduce((sum, m) => sum + (scores?.[m.id] || 0) * m.weight, 0) / 5;
@@ -221,6 +222,21 @@ async function loadQuestions() {
 
 async function saveQuestions(list) {
   await safeSet(QUESTIONS_KEY, JSON.stringify(list), true);
+}
+
+async function loadBaseStaffOverrides() {
+  const res = await safeGet(BASE_STAFF_OVERRIDES_KEY, true);
+  if (!res) return {};
+  try {
+    const parsed = JSON.parse(res.value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+async function saveBaseStaffOverrides(overrides) {
+  await safeSet(BASE_STAFF_OVERRIDES_KEY, JSON.stringify(overrides), true);
 }
 
 const styles = `
@@ -459,8 +475,43 @@ const styles = `
   }
 `;
 
+const ADMIN_SESSION_KEY = "lc_admin_session";
+const ADMIN_ACTIVITY_KEY = "lc_admin_last_active";
+const INACTIVITY_MS = 30 * 60 * 1000; // 30 minutes
+
+function getAdminSession() {
+  if (typeof window === "undefined") return false;
+  if (window.localStorage.getItem(ADMIN_SESSION_KEY) !== "1") return false;
+  const last = parseInt(window.localStorage.getItem(ADMIN_ACTIVITY_KEY) || "0", 10);
+  if (Date.now() - last > INACTIVITY_MS) {
+    // Expired — clear immediately
+    window.localStorage.removeItem(ADMIN_SESSION_KEY);
+    window.localStorage.removeItem(ADMIN_ACTIVITY_KEY);
+    return false;
+  }
+  return true;
+}
+
+function setAdminSession(val) {
+  if (typeof window === "undefined") return;
+  if (val) {
+    window.localStorage.setItem(ADMIN_SESSION_KEY, "1");
+    window.localStorage.setItem(ADMIN_ACTIVITY_KEY, String(Date.now()));
+  } else {
+    window.localStorage.removeItem(ADMIN_SESSION_KEY);
+    window.localStorage.removeItem(ADMIN_ACTIVITY_KEY);
+  }
+}
+
+function touchAdminActivity() {
+  if (typeof window === "undefined") return;
+  if (window.localStorage.getItem(ADMIN_SESSION_KEY) === "1") {
+    window.localStorage.setItem(ADMIN_ACTIVITY_KEY, String(Date.now()));
+  }
+}
+
 export default function PerformanceReviewApp() {
-  const [view, setView] = useState("home");
+  const [view, setView] = useState(() => (getAdminSession() ? "admin" : "home"));
   const [adminTab, setAdminTab] = useState("overview");
   const [selectedStaffId, setSelectedStaffId] = useState(null);
 
@@ -473,15 +524,26 @@ export default function PerformanceReviewApp() {
 
   const [extraStaff, setExtraStaff] = useState([]);
   const [questions, setQuestions] = useState([]);
+  const [baseStaffOverrides, setBaseStaffOverrides] = useState({});
 
-  const allStaff = useMemo(() => [...STAFF_LIST, ...extraStaff], [extraStaff]);
+  const allStaff = useMemo(() => {
+    const base = STAFF_LIST.map((s) =>
+      baseStaffOverrides[s.id] ? { ...s, ...baseStaffOverrides[s.id] } : s
+    );
+    return [...base, ...extraStaff];
+  }, [extraStaff, baseStaffOverrides]);
   const staffById = useMemo(() => Object.fromEntries(allStaff.map((s) => [s.id, s])), [allStaff]);
 
   useEffect(() => {
     let cancelled = false;
     async function load() {
       setLoading(true);
-      const [idx, extra, qs] = await Promise.all([loadAllIndex(), loadExtraStaff(), loadQuestions()]);
+      const [idx, extra, qs, overrides] = await Promise.all([
+        loadAllIndex(),
+        loadExtraStaff(),
+        loadQuestions(),
+        loadBaseStaffOverrides(),
+      ]);
 
       const combinedStaff = [...STAFF_LIST, ...extra];
       const tables = await Promise.all(combinedStaff.map((s) => loadStaffTable(s.id)));
@@ -494,6 +556,7 @@ export default function PerformanceReviewApp() {
       setTablesByStaff(map);
       setExtraStaff(extra);
       setQuestions(qs);
+      setBaseStaffOverrides(overrides);
       setLoading(false);
     }
     load();
@@ -536,10 +599,30 @@ export default function PerformanceReviewApp() {
   const selectedStaff = selectedStaffId ? staffById[selectedStaffId] : null;
 
   function signOut() {
+    setAdminSession(false);
     setView("home");
     setSelectedStaffId(null);
     setAdminTab("overview");
   }
+
+  // Touch activity timestamp on any user interaction while admin is logged in
+  useEffect(() => {
+    const EVENTS = ["mousemove", "mousedown", "keydown", "touchstart", "scroll", "click"];
+    const handler = () => touchAdminActivity();
+    EVENTS.forEach((e) => window.addEventListener(e, handler, { passive: true }));
+    return () => EVENTS.forEach((e) => window.removeEventListener(e, handler));
+  }, []);
+
+  // Poll every minute to auto-logout on inactivity
+  useEffect(() => {
+    if (view !== "admin" && view !== "staff-detail") return;
+    const interval = setInterval(() => {
+      if (!getAdminSession()) {
+        signOut();
+      }
+    }, 60_000);
+    return () => clearInterval(interval);
+  }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading) {
     return (
@@ -600,7 +683,7 @@ export default function PerformanceReviewApp() {
           />
         )}
 
-        {view === "admin-login" && <AdminLogin onSuccess={() => setView("admin")} />}
+        {view === "admin-login" && <AdminLogin onSuccess={() => { setAdminSession(true); setView("admin"); }} />}
 
         {view === "admin" && (
           <AdminDashboard
@@ -625,8 +708,19 @@ export default function PerformanceReviewApp() {
               await saveExtraStaff(next);
               setReloadToken((t) => t + 1);
             }}
+            onEditStaff={async (id, name, role) => {
+              const isBase = STAFF_LIST.some((s) => s.id === id);
+              if (isBase) {
+                const next = { ...baseStaffOverrides, [id]: { name: name.trim(), role: role.trim() } };
+                setBaseStaffOverrides(next);
+                await saveBaseStaffOverrides(next);
+              } else {
+                const next = extraStaff.map((s) => s.id === id ? { ...s, name: name.trim(), role: role.trim() } : s);
+                setExtraStaff(next);
+                await saveExtraStaff(next);
+              }
+            }}
             onDeleteStaff={async (id) => {
-              // Only deletable staff are those added via the admin UI (extraStaff)
               const next = extraStaff.filter((s) => s.id !== id);
               setExtraStaff(next);
               await saveExtraStaff(next);
@@ -636,6 +730,11 @@ export default function PerformanceReviewApp() {
                 return clone;
               });
               setReloadToken((t) => t + 1);
+            }}
+            onEditQuestion={async (id, text) => {
+              const next = questions.map((q) => q.id === id ? { ...q, text: text.trim() } : q);
+              setQuestions(next);
+              await saveQuestions(next);
             }}
             onDeleteQuestion={async (id) => {
               const next = questions.filter((q) => q.id !== id);
@@ -1140,7 +1239,9 @@ function AdminDashboard({
   questions,
   onAddQuestion,
   onAddStaff,
+  onEditStaff,
   onDeleteStaff,
+  onEditQuestion,
   onDeleteQuestion,
   baseStaffIds,
   onViewStaff,
@@ -1288,175 +1389,212 @@ function AdminDashboard({
       )}
 
       {adminTab === "manage" && (
-        <>
-          <div className="section-title">Add Staff Member</div>
-          <div className="table-wrap" style={{ padding: 24 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 12 }}>Create additional staff profiles</div>
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-              <input
-                type="text"
-                placeholder="Full name"
-                value={newStaffName}
-                onChange={(e) => setNewStaffName(e.target.value)}
-                style={{
-                  flex: 1,
-                  minWidth: 180,
-                  padding: "10px 12px",
-                  borderRadius: 6,
-                  border: "1px solid var(--border)",
-                  background: "var(--surface)",
-                  color: "var(--text)",
-                  fontSize: 14,
-                }}
-              />
-              <input
-                type="text"
-                placeholder="Role / Title"
-                value={newStaffRole}
-                onChange={(e) => setNewStaffRole(e.target.value)}
-                style={{
-                  flex: 1,
-                  minWidth: 180,
-                  padding: "10px 12px",
-                  borderRadius: 6,
-                  border: "1px solid var(--border)",
-                  background: "var(--surface)",
-                  color: "var(--text)",
-                  fontSize: 14,
-                }}
-              />
-              <button
-                className="btn btn-gold"
-                disabled={!newStaffName.trim()}
-                onClick={async () => {
-                  if (!newStaffName.trim()) return;
-                  await onAddStaff(newStaffName, newStaffRole);
-                  setNewStaffName("");
-                  setNewStaffRole("");
-                }}
-              >
-                Add Staff
-              </button>
-            </div>
-            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
-              New staff will appear in the staff overview and in future review cycles.
-            </div>
-          </div>
-
-          <div className="section-title">Existing Added Staff</div>
-          <div className="table-wrap" style={{ padding: 0 }}>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Role</th>
-                  <th style={{ width: 80 }}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {staffList.filter((s) => !baseStaffIds?.includes(s.id)).length === 0 ? (
-                  <tr>
-                    <td colSpan={3} style={{ fontSize: 13, color: "var(--muted)", padding: 16 }}>
-                      No additional staff have been added yet.
-                    </td>
-                  </tr>
-                ) : (
-                  staffList
-                    .filter((s) => !baseStaffIds?.includes(s.id))
-                    .map((s) => (
-                      <tr key={s.id}>
-                        <td style={{ fontWeight: 500 }}>{s.name}</td>
-                        <td style={{ color: "var(--muted)" }}>{s.role}</td>
-                        <td style={{ textAlign: "right" }}>
-                          <button
-                            className="btn btn-ghost btn-sm"
-                            style={{ color: "var(--danger)", borderColor: "var(--danger)" }}
-                            onClick={() => onDeleteStaff(s.id)}
-                          >
-                            Delete
-                          </button>
-                        </td>
-                      </tr>
-                    ))
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="section-title">Custom Questions</div>
-          <div className="table-wrap" style={{ padding: 24 }}>
-            <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 12 }}>Add guidance questions for reviewers</div>
-            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
-              <input
-                type="text"
-                placeholder="Type a question (e.g. “What did this colleague do particularly well this year?”)"
-                value={newQuestion}
-                onChange={(e) => setNewQuestion(e.target.value)}
-                style={{
-                  flex: 1,
-                  minWidth: 260,
-                  padding: "10px 12px",
-                  borderRadius: 6,
-                  border: "1px solid var(--border)",
-                  background: "var(--surface)",
-                  color: "var(--text)",
-                  fontSize: 14,
-                }}
-              />
-              <button
-                className="btn btn-gold"
-                disabled={!newQuestion.trim()}
-                onClick={async () => {
-                  const text = newQuestion.trim();
-                  if (!text) return;
-                  await onAddQuestion(text);
-                  setNewQuestion("");
-                }}
-              >
-                Add Question
-              </button>
-            </div>
-            {questions?.length ? (
-              <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-                {questions.map((q) => (
-                  <li
-                    key={q.id}
-                    style={{
-                      padding: "10px 12px",
-                      borderRadius: 6,
-                      border: "1px solid var(--border)",
-                      background: "var(--surface)",
-                      fontSize: 13,
-                      color: "var(--text)",
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: 12,
-                    }}
-                  >
-                    <div>
-                      <div>{q.text}</div>
-                      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
-                        {formatDate(q.createdAt || q.created_at || new Date().toISOString(), "short")}
-                      </div>
-                    </div>
-                    <button
-                      className="btn btn-ghost btn-sm"
-                      style={{ color: "var(--danger)", borderColor: "var(--danger)" }}
-                      onClick={() => onDeleteQuestion(q.id)}
-                    >
-                      Delete
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div style={{ fontSize: 13, color: "var(--muted)" }}>No custom questions added yet.</div>
-            )}
-          </div>
-        </>
+        <ManageTab
+          staffList={staffList}
+          questions={questions}
+          baseStaffIds={baseStaffIds}
+          newStaffName={newStaffName}
+          setNewStaffName={setNewStaffName}
+          newStaffRole={newStaffRole}
+          setNewStaffRole={setNewStaffRole}
+          newQuestion={newQuestion}
+          setNewQuestion={setNewQuestion}
+          onAddStaff={onAddStaff}
+          onEditStaff={onEditStaff}
+          onDeleteStaff={onDeleteStaff}
+          onAddQuestion={onAddQuestion}
+          onEditQuestion={onEditQuestion}
+          onDeleteQuestion={onDeleteQuestion}
+        />
       )}
     </div>
+  );
+}
+
+const inlineInputStyle = {
+  padding: '7px 10px',
+  borderRadius: 5,
+  border: '1px solid var(--border)',
+  background: 'var(--bg)',
+  color: 'var(--text)',
+  fontSize: 13,
+  outline: 'none',
+  width: '100%',
+};
+
+function ManageTab({
+  staffList,
+  questions,
+  baseStaffIds,
+  newStaffName, setNewStaffName,
+  newStaffRole, setNewStaffRole,
+  newQuestion, setNewQuestion,
+  onAddStaff, onEditStaff, onDeleteStaff,
+  onAddQuestion, onEditQuestion, onDeleteQuestion,
+}) {
+  const [editingStaffId, setEditingStaffId] = useState(null);
+  const [editName, setEditName] = useState('');
+  const [editRole, setEditRole] = useState('');
+  const [editingQId, setEditingQId] = useState(null);
+  const [editQText, setEditQText] = useState('');
+
+  function startEditStaff(s) { setEditingStaffId(s.id); setEditName(s.name); setEditRole(s.role); }
+  function cancelEditStaff() { setEditingStaffId(null); setEditName(''); setEditRole(''); }
+  async function saveEditStaff(id) {
+    if (!editName.trim()) return;
+    await onEditStaff(id, editName, editRole);
+    cancelEditStaff();
+  }
+
+  function startEditQ(q) { setEditingQId(q.id); setEditQText(q.text); }
+  function cancelEditQ() { setEditingQId(null); setEditQText(''); }
+  async function saveEditQ(id) {
+    if (!editQText.trim()) return;
+    await onEditQuestion(id, editQText);
+    cancelEditQ();
+  }
+
+  return (
+    <>
+      <div className="section-title">Add Staff Member</div>
+      <div className="table-wrap" style={{ padding: 24, marginBottom: 24 }}>
+        <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 12 }}>Create an additional staff profile</div>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <input type="text" placeholder="Full name" value={newStaffName} onChange={(e) => setNewStaffName(e.target.value)}
+            style={{ flex: 1, minWidth: 180, ...inlineInputStyle }} />
+          <input type="text" placeholder="Role / Title" value={newStaffRole} onChange={(e) => setNewStaffRole(e.target.value)}
+            style={{ flex: 1, minWidth: 180, ...inlineInputStyle }} />
+          <button className="btn btn-gold" disabled={!newStaffName.trim()} onClick={async () => {
+            if (!newStaffName.trim()) return;
+            await onAddStaff(newStaffName, newStaffRole);
+            setNewStaffName(''); setNewStaffRole('');
+          }}>Add Staff</button>
+        </div>
+      </div>
+
+      <div className="section-title">All Staff ({staffList.length})</div>
+      <div className="table-wrap" style={{ marginBottom: 32 }}>
+        <table className="table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Name</th>
+              <th>Role</th>
+              <th style={{ width: 180, textAlign: 'right' }}>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {staffList.map((s, idx) => {
+              const isBase = baseStaffIds?.includes(s.id);
+              const isEditing = editingStaffId === s.id;
+              return (
+                <tr key={s.id}>
+                  <td style={{ color: 'var(--dim)', width: 36 }}>{idx + 1}</td>
+                  {isEditing ? (
+                    <>
+                      <td><input value={editName} onChange={(e) => setEditName(e.target.value)} style={{ ...inlineInputStyle }} autoFocus
+                        onKeyDown={(e) => { if (e.key === 'Enter') saveEditStaff(s.id); if (e.key === 'Escape') cancelEditStaff(); }} /></td>
+                      <td><input value={editRole} onChange={(e) => setEditRole(e.target.value)} style={{ ...inlineInputStyle }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') saveEditStaff(s.id); if (e.key === 'Escape') cancelEditStaff(); }} /></td>
+                    </>
+                  ) : (
+                    <>
+                      <td style={{ fontWeight: 500 }}>{s.name}</td>
+                      <td style={{ color: 'var(--muted)' }}>{s.role}</td>
+                    </>
+                  )}
+                  <td style={{ textAlign: 'right' }}>
+                    {isEditing ? (
+                      <span style={{ display: 'inline-flex', gap: 8 }}>
+                        <button className="btn btn-gold btn-sm" onClick={() => saveEditStaff(s.id)} disabled={!editName.trim()}>Save</button>
+                        <button className="btn btn-ghost btn-sm" onClick={cancelEditStaff}>Cancel</button>
+                      </span>
+                    ) : (
+                      <span style={{ display: 'inline-flex', gap: 8 }}>
+                        <button className="btn btn-ghost btn-sm" onClick={() => startEditStaff(s)}>Edit</button>
+                        {!isBase && (
+                          <button className="btn btn-ghost btn-sm" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}
+                            onClick={() => onDeleteStaff(s.id)}>Delete</button>
+                        )}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="section-title">Custom Questions</div>
+      <div className="table-wrap" style={{ padding: 24, marginBottom: 16 }}>
+        <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 12 }}>Add a guidance question for reviewers</div>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <input type="text" placeholder="e.g. What did this colleague do particularly well this year?"
+            value={newQuestion} onChange={(e) => setNewQuestion(e.target.value)}
+            style={{ flex: 1, minWidth: 260, ...inlineInputStyle }} />
+          <button className="btn btn-gold" disabled={!newQuestion.trim()} onClick={async () => {
+            const text = newQuestion.trim(); if (!text) return;
+            await onAddQuestion(text); setNewQuestion('');
+          }}>Add Question</button>
+        </div>
+      </div>
+
+      {questions?.length ? (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Question</th>
+                <th>Added</th>
+                <th style={{ width: 180, textAlign: 'right' }}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {questions.map((q, idx) => {
+                const isEditing = editingQId === q.id;
+                return (
+                  <tr key={q.id}>
+                    <td style={{ color: 'var(--dim)', width: 36 }}>{idx + 1}</td>
+                    <td>
+                      {isEditing ? (
+                        <input value={editQText} onChange={(e) => setEditQText(e.target.value)}
+                          style={{ ...inlineInputStyle }} autoFocus
+                          onKeyDown={(e) => { if (e.key === 'Enter') saveEditQ(q.id); if (e.key === 'Escape') cancelEditQ(); }} />
+                      ) : (
+                        <span style={{ fontSize: 13 }}>{q.text}</span>
+                      )}
+                    </td>
+                    <td style={{ color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+                      {formatDate(q.createdAt || q.created_at || new Date().toISOString(), 'short')}
+                    </td>
+                    <td style={{ textAlign: 'right' }}>
+                      {isEditing ? (
+                        <span style={{ display: 'inline-flex', gap: 8 }}>
+                          <button className="btn btn-gold btn-sm" onClick={() => saveEditQ(q.id)} disabled={!editQText.trim()}>Save</button>
+                          <button className="btn btn-ghost btn-sm" onClick={cancelEditQ}>Cancel</button>
+                        </span>
+                      ) : (
+                        <span style={{ display: 'inline-flex', gap: 8 }}>
+                          <button className="btn btn-ghost btn-sm" onClick={() => startEditQ(q)}>Edit</button>
+                          <button className="btn btn-ghost btn-sm" style={{ color: 'var(--danger)', borderColor: 'var(--danger)' }}
+                            onClick={() => onDeleteQuestion(q.id)}>Delete</button>
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="empty-state" style={{ padding: 32 }}>
+          <div className="empty-state-icon">📝</div>No custom questions yet. Add one above.
+        </div>
+      )}
+    </>
   );
 }
 
