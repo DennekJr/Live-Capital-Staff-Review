@@ -85,93 +85,77 @@ function makeId(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
-function createLocalFallbackStorage() {
-  const prefix = (shared) => (shared ? "shared:" : "private:");
-  return {
-    async get(key, shared) {
-      const value = window.localStorage.getItem(prefix(shared) + key);
-      return value == null ? null : { key, value, shared: !!shared };
-    },
-    async set(key, value, shared) {
-      window.localStorage.setItem(prefix(shared) + key, String(value));
-    },
-    async delete(key, shared) {
-      window.localStorage.removeItem(prefix(shared) + key);
-    },
-    async list(prefixArg = "", shared) {
-      const pfx = prefix(shared) + (prefixArg || "");
-      const out = [];
-      for (let i = 0; i < window.localStorage.length; i += 1) {
-        const k = window.localStorage.key(i);
-        if (!k || !k.startsWith(pfx)) continue;
-        out.push(k.slice(prefix(shared).length));
-      }
-      return out;
-    },
-  };
-}
+// ─── Server-backed shared storage (all users see the same data) ───────────────
 
-function getStorage() {
-  if (typeof window === "undefined") return null;
-  if (window.storage && typeof window.storage.get === "function") return window.storage;
-  return createLocalFallbackStorage();
-}
-
-async function safeGet(key, shared) {
+async function serverGet(key) {
   try {
-    const s = getStorage();
-    if (!s) return null;
-    return await s.get(key, shared);
+    const res = await fetch(`/api/shared?key=${encodeURIComponent(key)}`);
+    const json = await res.json();
+    return json.ok ? json.value : null;
   } catch {
     return null;
   }
 }
 
-async function safeSet(key, value, shared) {
+async function serverSet(key, value) {
   try {
-    const s = getStorage();
-    if (!s) return;
-    await s.set(key, value, shared);
-  } catch {
-    // ignore
-  }
+    await fetch("/api/shared", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, value }),
+    });
+  } catch { /* non-fatal */ }
 }
 
+// ─── Per-reviewer progress (private, browser-local is fine) ──────────────────
+
+function localGet(key) {
+  if (typeof window === "undefined") return null;
+  const v = window.localStorage.getItem(key);
+  return v == null ? null : v;
+}
+
+function localSet(key, value) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(key, value);
+}
+
+// ─── Staff review tables ──────────────────────────────────────────────────────
+
 async function loadStaffTable(staffId) {
-  const res = await safeGet(staffTableKey(staffId), true);
-  if (!res) return [];
   try {
-    const parsed = JSON.parse(res.value);
-    return Array.isArray(parsed) ? parsed : [];
+    const res = await fetch(`/api/reviews/${encodeURIComponent(staffId)}`);
+    const json = await res.json();
+    return Array.isArray(json.rows) ? json.rows : [];
   } catch {
     return [];
   }
 }
 
 async function injectRowIntoStaffTable(staffId, row) {
-  const table = await loadStaffTable(staffId);
-  table.push(row);
-  await safeSet(staffTableKey(staffId), JSON.stringify(table), true);
-  return table;
+  try {
+    await fetch(`/api/reviews/${encodeURIComponent(staffId)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ row }),
+    });
+  } catch { /* non-fatal */ }
 }
 
+// ─── Global index ─────────────────────────────────────────────────────────────
+
 async function loadAllIndex() {
-  const res = await safeGet(ALL_INDEX_KEY, true);
-  if (!res) return [];
-  try {
-    const parsed = JSON.parse(res.value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  const val = await serverGet(ALL_INDEX_KEY);
+  return Array.isArray(val) ? val : [];
 }
 
 async function appendToAllIndex(entry) {
   const idx = await loadAllIndex();
   idx.push(entry);
-  await safeSet(ALL_INDEX_KEY, JSON.stringify(idx), true);
-  return idx;
+  await serverSet(ALL_INDEX_KEY, idx);
 }
+
+// ─── Duplicate check ──────────────────────────────────────────────────────────
 
 async function hasExistingReviewForPair(reviewerId, staffId) {
   if (!reviewerId || !staffId) return false;
@@ -179,11 +163,13 @@ async function hasExistingReviewForPair(reviewerId, staffId) {
   return table.some((row) => row.reviewerId === reviewerId);
 }
 
+// ─── Per-reviewer progress (localStorage — private per browser) ───────────────
+
 async function loadReviewerProgress(reviewerId) {
-  const res = await safeGet(reviewerProgressKey(reviewerId), false);
-  if (!res) return [];
   try {
-    const parsed = JSON.parse(res.value);
+    const raw = localGet(reviewerProgressKey(reviewerId));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
@@ -191,52 +177,36 @@ async function loadReviewerProgress(reviewerId) {
 }
 
 async function saveReviewerProgress(reviewerId, reviewedIds) {
-  await safeSet(reviewerProgressKey(reviewerId), JSON.stringify(reviewedIds), false);
+  localSet(reviewerProgressKey(reviewerId), JSON.stringify(reviewedIds));
 }
 
+// ─── Shared admin data ────────────────────────────────────────────────────────
+
 async function loadExtraStaff() {
-  const res = await safeGet(EXTRA_STAFF_KEY, true);
-  if (!res) return [];
-  try {
-    const parsed = JSON.parse(res.value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  const val = await serverGet(EXTRA_STAFF_KEY);
+  return Array.isArray(val) ? val : [];
 }
 
 async function saveExtraStaff(list) {
-  await safeSet(EXTRA_STAFF_KEY, JSON.stringify(list), true);
+  await serverSet(EXTRA_STAFF_KEY, list);
 }
 
 async function loadQuestions() {
-  const res = await safeGet(QUESTIONS_KEY, true);
-  if (!res) return [];
-  try {
-    const parsed = JSON.parse(res.value);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  const val = await serverGet(QUESTIONS_KEY);
+  return Array.isArray(val) ? val : [];
 }
 
 async function saveQuestions(list) {
-  await safeSet(QUESTIONS_KEY, JSON.stringify(list), true);
+  await serverSet(QUESTIONS_KEY, list);
 }
 
 async function loadBaseStaffOverrides() {
-  const res = await safeGet(BASE_STAFF_OVERRIDES_KEY, true);
-  if (!res) return {};
-  try {
-    const parsed = JSON.parse(res.value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
+  const val = await serverGet(BASE_STAFF_OVERRIDES_KEY);
+  return val && typeof val === "object" && !Array.isArray(val) ? val : {};
 }
 
 async function saveBaseStaffOverrides(overrides) {
-  await safeSet(BASE_STAFF_OVERRIDES_KEY, JSON.stringify(overrides), true);
+  await serverSet(BASE_STAFF_OVERRIDES_KEY, overrides);
 }
 
 const styles = `
@@ -901,17 +871,6 @@ function ReviewWizard({ staffList, onSubmitted, onCycleState, onDone }) {
 
     await injectRowIntoStaffTable(revieweeId, row);
     await appendToAllIndex({ staffId: revieweeId, rowId: row.rowId, timestamp: ts, score: weightedScore });
-
-    // Also persist into a physical monthly file via API route (server-side fs)
-    try {
-      await fetch("/api/reviews", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ staffId: revieweeId, row }),
-      });
-    } catch {
-      // Non-fatal – storage-backed tables remain source of truth
-    }
 
     const nextReviewed = Array.from(new Set([...reviewedIds, revieweeId]));
     setReviewedIds(nextReviewed);
